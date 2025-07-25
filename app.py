@@ -137,7 +137,7 @@ def embed_image_files(image_paths, chunk_size=8):
     return vectors
 
 
-def process_batch(batch_dir, webhook_url, batch_id):
+def process_batch(batch_dir, webhook_url, batch_id, shop):
     try:
         print("Starting batch processing.", flush=True)
 
@@ -176,7 +176,7 @@ def process_batch(batch_dir, webhook_url, batch_id):
                 "metadata": m
             })
 
-        response = requests.post(webhook_url, json={"batch_id": batch_id, "results": results})
+        response = requests.post(webhook_url, json={"batch_id": batch_id, "results": results, "shop": shop})
         print(f"[webhook] Sent results for batch {batch_id}: {response.status_code}", flush=True)
     except Exception as e:
         print(f"[process_batch] Uncaught exception: {e}", flush=True)
@@ -186,6 +186,7 @@ def process_batch(batch_dir, webhook_url, batch_id):
 def start_batch():
     batch_id = request.form.get("batch_id")
     webhook_url = request.form.get("webhook_url")
+    shop = request.form.get("shop")
     if not batch_id or not webhook_url:
         return jsonify({"error": "Missing batch_id or webhook_url"}), 400
 
@@ -201,8 +202,42 @@ def start_batch():
     with ZipFile(zip_path, "r") as zip_ref:
         zip_ref.extractall(work_dir)
 
-    Thread(target=process_batch, args=(work_dir, webhook_url, batch_id)).start()
+    Thread(target=process_batch, args=(work_dir, webhook_url, batch_id, shop)).start()
     return jsonify({"status": "accepted", "batch_id": batch_id}), 202
+
+from io import BytesIO
+import torch.nn.functional as F
+
+@app.route("/similarity_image_text", methods=["POST"])
+def similarity_image_text():
+    if "image" not in request.files or "query" not in request.form:
+        return jsonify({"error": "Missing 'image' file or 'query' field"}), 400
+
+    try:
+        image_file = request.files["image"]
+        query = request.form["query"]
+
+        # Load and preprocess image
+        image = Image.open(BytesIO(image_file.read())).convert("RGB")
+        inputs = processor(text=[query], images=[image], return_tensors="pt", padding=True).to(device)
+
+        with torch.no_grad():
+            text_emb = model.get_text_features(**{k: inputs[k] for k in inputs if k.startswith("input_ids") or k.startswith("attention_mask")})
+            image_emb = model.get_image_features(**{k: inputs[k] for k in inputs if k.startswith("pixel_values")})
+
+        # Normalize
+        text_emb = F.normalize(text_emb, p=2, dim=-1)
+        image_emb = F.normalize(image_emb, p=2, dim=-1)
+
+        similarity = torch.cosine_similarity(text_emb, image_emb).item()
+
+        return jsonify({
+            "query": query,
+            "cosine_similarity": round(similarity, 4)
+        })
+
+    except Exception as e:
+        return jsonify({"error": f"Failed to compute similarity: {str(e)}"}), 500
 
 # --- Health check ---
 @app.route("/health", methods=["GET"])
