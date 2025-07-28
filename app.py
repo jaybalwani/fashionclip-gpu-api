@@ -10,6 +10,12 @@ import uuid
 from zipfile import ZipFile
 from threading import Thread
 from more_itertools import chunked
+import pickle
+from sklearn.metrics.pairwise import cosine_similarity
+
+import sys
+
+
 
 app = Flask(__name__)
 
@@ -23,7 +29,34 @@ model.eval()
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model.to(device)
 
+# Load precomputed body shape clothing embeddings
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PKL_PATH = os.path.join(BASE_DIR, "body_shape_embeddings.pkl")
+
+# Now open the file safely
+with open(PKL_PATH, "rb") as f:
+    body_shape_embedding_store = pickle.load(f)
+
 # --- Utility ---
+def log(*args, **kwargs):
+    print(*args, **kwargs)
+    sys.stdout.flush()
+    sys.stderr.flush()
+
+def tag_body_shapes_for_image(image_embedding, embedding_store, min_threshold=0.3, min_matches=1):
+    body_shape_scores = {}
+    for shape, clothing_dict in embedding_store.items():
+        matches = 0
+        for _, emb in clothing_dict.items():
+            sim = cosine_similarity([image_embedding], [emb])[0][0]
+            if sim >= min_threshold:
+                matches += 1
+        if matches >= min_matches:
+            body_shape_scores[shape] = matches
+
+    return sorted(body_shape_scores.keys(), key=lambda s: -body_shape_scores[s])
+
+
 def normalize_embeddings(arr):
     norms = np.linalg.norm(arr, axis=1, keepdims=True)
     return arr / (norms + 1e-8)
@@ -161,9 +194,13 @@ def process_batch(batch_dir, webhook_url, batch_id, shop):
         img_index = 0
         for i, m in enumerate(meta):
             img_vec = [0.0] * 512
+            body_shape_tags = []
             if image_paths[i]:
                 img_vec = image_vecs[img_index]
                 img_index += 1
+                body_shape_tags = tag_body_shapes_for_image(img_vec, body_shape_embedding_store)
+                # log(f"Body shape tag: {body_shape_tags}")
+
 
             results.append({
                 "variant_id": m["variant_id"],
@@ -173,8 +210,10 @@ def process_batch(batch_dir, webhook_url, batch_id, shop):
                 "size_embedding": safe_vector(size_vecs[i]),
                 "color_embedding": safe_vector(color_vecs[i]),
                 "image_embedding": safe_vector(img_vec),
+                "body_shapes": body_shape_tags,
                 "metadata": m
             })
+
 
         response = requests.post(webhook_url, json={"batch_id": batch_id, "results": results, "shop": shop})
         print(f"[webhook] Sent results for batch {batch_id}: {response.status_code}", flush=True)
