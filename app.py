@@ -1,71 +1,12 @@
 from flask import Flask, request, jsonify
-from transformers import CLIPProcessor, CLIPModel
 import torch
 from PIL import Image
-import numpy as np
 import requests
-import os
-import json
-import uuid
-from zipfile import ZipFile
-from threading import Thread
-from more_itertools import chunked
-import pickle
 from sklearn.metrics.pairwise import cosine_similarity
-
-import sys
-
-
+from batch_utilities.tasks import sync_products_task
+from batch_utilities.product_sync import safe_vector, embed_texts, processor, model, device, normalize_embeddings
 
 app = Flask(__name__)
-
-# Load model & processor
-model_name = "patrickjohncyh/fashion-clip"
-model = CLIPModel.from_pretrained(model_name)
-processor = CLIPProcessor.from_pretrained(model_name)
-model.eval()
-
-# Auto device detection
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model.to(device)
-
-# Load precomputed body shape clothing embeddings
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PKL_PATH = os.path.join(BASE_DIR, "body_shape_embeddings.pkl")
-
-# Now open the file safely
-with open(PKL_PATH, "rb") as f:
-    body_shape_embedding_store = pickle.load(f)
-
-# --- Utility ---
-def log(*args, **kwargs):
-    print(*args, **kwargs)
-    sys.stdout.flush()
-    sys.stderr.flush()
-
-def tag_body_shapes_for_image(image_embedding, embedding_store, min_threshold=0.3, min_matches=1):
-    body_shape_scores = {}
-    for shape, clothing_dict in embedding_store.items():
-        matches = 0
-        for _, emb in clothing_dict.items():
-            sim = cosine_similarity([image_embedding], [emb])[0][0]
-            if sim >= min_threshold:
-                matches += 1
-        if matches >= min_matches:
-            body_shape_scores[shape] = matches
-
-    return sorted(body_shape_scores.keys(), key=lambda s: -body_shape_scores[s])
-
-
-def normalize_embeddings(arr):
-    norms = np.linalg.norm(arr, axis=1, keepdims=True)
-    return arr / (norms + 1e-8)
-
-def safe_vector(vec, dim=512):
-    if not vec or len(vec) != dim:
-        return [1.0 / (dim ** 0.5)] * dim
-    norm = np.linalg.norm(vec)
-    return (vec / norm).tolist() if norm > 0 else [1.0 / (dim ** 0.5)] * dim
 
 # --- Text Embedding Endpoint ---
 @app.route("/embed_text", methods=["POST"])
@@ -123,126 +64,24 @@ def embed_images():
 
     return jsonify({"embeddings": results})
 
-# --- Batch Processing ---
-def embed_texts(texts, chunk_size=64):
-    vectors = []
-    for chunk in chunked(texts, chunk_size):
-        if not any(chunk):
-            vectors.extend([[0.0] * 512] * len(chunk))
-            continue
-        inputs = processor(text=chunk, return_tensors="pt", padding=True, truncation=True, max_length=77).to(device)
-        with torch.no_grad():
-            embeddings = model.get_text_features(**inputs)
-            embeddings = embeddings / embeddings.norm(dim=-1, keepdim=True)
-        vectors.extend(normalize_embeddings(embeddings.cpu().numpy()).tolist())
-    return vectors
-
-def embed_image_files(image_paths, chunk_size=8):
-    vectors = []
-    for chunk in chunked(image_paths, chunk_size):
-        images = []
-        chunk_vecs = []
-
-        for path in chunk:
-            try:
-                img = Image.open(path).convert("RGB")
-                images.append(img)
-            except Exception as e:
-                print(f"[image read] Failed for {path}: {e}", flush=True)
-                chunk_vecs.append([0.0] * 512)
-
-        if not images:
-            vectors.extend(chunk_vecs)
-            continue
-
-        try:
-            inputs = processor(images=images, return_tensors="pt", padding=True).to(device)
-            with torch.no_grad():
-                embeddings = model.get_image_features(**inputs)
-                embeddings = embeddings / embeddings.norm(dim=-1, keepdim=True)
-
-            normed = normalize_embeddings(embeddings.cpu().numpy()).tolist()
-            vectors.extend(normed)
-        except Exception as e:
-            print(f"[embed_images] Failed chunk: {e}", flush=True)
-            vectors.extend([[0.0] * 512] * len(images))
-
-    return vectors
-
-
-def process_batch(batch_dir, webhook_url, batch_id, shop):
-    try:
-        print("Starting batch processing.", flush=True)
-
-        metadata_path = os.path.join(batch_dir, "metadata.json")
-        with open(metadata_path) as f:
-            meta = json.load(f)
-
-        texts = [f"{m['product_title']} - {m['variant_title']}. Tags: {', '.join(m['tags'])}" for m in meta]
-        sizes = [f"Size {m['size']}" if m.get("size") else "" for m in meta]
-        colors = [f"Color {m['color']}" if m.get("color") else "" for m in meta]
-        image_paths = [os.path.join(batch_dir, "images", m["image_filename"]) if m.get("image_filename") else None for m in meta]
-
-        text_vecs = embed_texts(texts)
-        size_vecs = embed_texts(sizes)
-        color_vecs = embed_texts(colors)
-
-        image_paths_filtered = [p for p in image_paths if p]
-        image_vecs = embed_image_files(image_paths_filtered)
-
-        results = []
-        img_index = 0
-        for i, m in enumerate(meta):
-            img_vec = [0.0] * 512
-            body_shape_tags = []
-            if image_paths[i]:
-                img_vec = image_vecs[img_index]
-                img_index += 1
-                body_shape_tags = tag_body_shapes_for_image(img_vec, body_shape_embedding_store)
-                # log(f"Body shape tag: {body_shape_tags}")
-
-
-            results.append({
-                "variant_id": m["variant_id"],
-                "product_id": m["product_id"],
-                "shop": m["shop"],
-                "embedding": safe_vector(text_vecs[i]),
-                "size_embedding": safe_vector(size_vecs[i]),
-                "color_embedding": safe_vector(color_vecs[i]),
-                "image_embedding": safe_vector(img_vec),
-                "body_shapes": body_shape_tags,
-                "metadata": m
-            })
-
-
-        response = requests.post(webhook_url, json={"batch_id": batch_id, "results": results, "shop": shop})
-        print(f"[webhook] Sent results for batch {batch_id}: {response.status_code}", flush=True)
-    except Exception as e:
-        print(f"[process_batch] Uncaught exception: {e}", flush=True)
-
+#-------------- MAIN BATCH PROCESSING ENDPOINT -------------------#
 
 @app.route("/start_batch", methods=["POST"])
 def start_batch():
-    batch_id = request.form.get("batch_id")
-    webhook_url = request.form.get("webhook_url")
-    shop = request.form.get("shop")
-    if not batch_id or not webhook_url:
-        return jsonify({"error": "Missing batch_id or webhook_url"}), 400
+    try:
 
-    batch_file = request.files.get("batch")
-    if not batch_file:
-        return jsonify({"error": "Missing batch file"}), 400
+        data = request.get_json()
+        shop = data.get("shop", None)
+        token = data.get("token", None)
 
-    work_dir = f"/tmp/spot_batch_{batch_id}"
-    os.makedirs(work_dir, exist_ok=True)
-    zip_path = os.path.join(work_dir, "batch.zip")
-    batch_file.save(zip_path)
+        sync_products_task.delay(shop, token)
 
-    with ZipFile(zip_path, "r") as zip_ref:
-        zip_ref.extractall(work_dir)
+        return jsonify({"status": "accepted"}), 202
+    except Exception as e:
+        print(f"Error in starting batch: {e}")
 
-    Thread(target=process_batch, args=(work_dir, webhook_url, batch_id, shop)).start()
-    return jsonify({"status": "accepted", "batch_id": batch_id}), 202
+
+#------------------ TEST ENDPOINTS --------------------------------------------------------#
 
 from io import BytesIO
 import torch.nn.functional as F
@@ -277,6 +116,26 @@ def similarity_image_text():
 
     except Exception as e:
         return jsonify({"error": f"Failed to compute similarity: {str(e)}"}), 500
+    
+@app.route("/similarity_text", methods=["POST"])
+def similarity_text():
+    query1 = request.form.get("query1")
+    query2 = request.form.get("query2")
+
+    if not query1 or not query2:
+        return jsonify({"error": "Both 'query1' and 'query2' fields are required"}), 400
+
+    try:
+        embeddings = embed_texts([query1, query2])
+        sim = cosine_similarity([embeddings[0]], [embeddings[1]])[0][0]
+        return jsonify({
+            "query1": query1,
+            "query2": query2,
+            "cosine_similarity": round(float(sim), 4)
+        })
+    except Exception as e:
+        return jsonify({"error": f"Failed to compute similarity: {str(e)}"}), 500
+
 
 # --- Health check ---
 @app.route("/health", methods=["GET"])
