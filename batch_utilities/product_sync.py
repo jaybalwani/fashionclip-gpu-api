@@ -21,13 +21,6 @@ load_dotenv()
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", 4))
 ELASTIC_URL = os.getenv("ELASTIC_URL", "http://172.31.29.130:9200")
 
-es = Elasticsearch(
-    ELASTIC_URL,
-    basic_auth=("elastic", os.getenv("ELASTIC_PASSWORD")),
-    verify_certs=False
-)
-
-
 def safe_vector(vector, dim=512):
     if not vector or not isinstance(vector, list) or len(vector) != dim:
         return [1.0 / (dim ** 0.5)] * dim
@@ -377,6 +370,11 @@ def process_batch(batch_dir, batch_id, shop, items):
 
         conn, cur = connection(dictFlag=True)
         try:
+            es = Elasticsearch(
+                ELASTIC_URL,
+                basic_auth=("elastic", os.getenv("ELASTIC_PASSWORD")),
+                verify_certs=False
+            )
             actions=[]
             for item in results:
                 doc_id = quote(f"{item['shop']}__{item['variant_id']}", safe="")
