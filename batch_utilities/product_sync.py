@@ -439,7 +439,7 @@ def process_batch(batch_dir, batch_id, shop, items):
             conn.commit()
             print(f"[SUCCESS] Batch processing complete!", flush=True)
         except Exception as e:
-            print(f"[ERROR] Failed to build doc for result[{idx}]: {e}", flush=True)
+            print(f"[ERROR] Failed to build doc for result: {e}", flush=True)
             print(f"Metadata first index: {meta}", flush=True)
         finally:
             cur.close()
