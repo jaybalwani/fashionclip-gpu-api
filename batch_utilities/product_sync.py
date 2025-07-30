@@ -19,7 +19,7 @@ from elasticsearch.helpers import bulk
 load_dotenv()
 
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", 4))
-ELASTIC_URL = "https://styailist.com/es/"
+ELASTIC_URL = os.getenv("ELASTIC_URL", "http://127.0.0.1:9200")
 
 def safe_vector(vector, dim=512):
     if not vector or not isinstance(vector, list) or len(vector) != dim:
@@ -345,14 +345,22 @@ def process_batch(batch_dir, batch_id, shop, items):
         sizes = [f"Size {m['size']}" if m.get("size") else "" for m in meta]
         colors = [f"Color {m['color']}" if m.get("color") else "" for m in meta]
         image_paths = [os.path.join(batch_dir, "images", m["image_filename"]) if m.get("image_filename") else None for m in meta]
-
+        
+        print("Now embedding texts", flush=True)
         text_vecs = embed_texts(texts)
+
+        print("Now embedding product_types", flush=True)
         product_type_vecs = embed_texts(product_types)
 
+        print("Now embedding sizes", flush=True)
         size_vecs = embed_texts(sizes)
+
+        print("Now embedding colors", flush=True)
         color_vecs = embed_texts(colors)
 
         image_paths_filtered = [p for p in image_paths if p]
+
+        print("Now embedding images", flush=True)
         image_vecs = embed_image_files(image_paths_filtered)
 
         results = []
