@@ -19,7 +19,7 @@ from elasticsearch.helpers import bulk
 load_dotenv()
 
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", 4))
-ELASTIC_URL = os.getenv("ELASTIC_URL", "http://172.31.29.130:9200")
+ELASTIC_URL = "https://styailist.com/es/"
 
 def safe_vector(vector, dim=512):
     if not vector or not isinstance(vector, list) or len(vector) != dim:
@@ -186,12 +186,7 @@ def process_products(shop, access_token):
 
                 })
     
-        # else:
-        #     print("Using cached shopify material for symconverge.myshopify.com", flush=True)
-        #     batch_id = "f1d8cc57-02a6-4f52-a0ca-b5787bac5cf0"
-        #     base_dir = "/home/jay-work/shopify_tmp/batch_f1d8cc57-02a6-4f52-a0ca-b5787bac5cf0"
-        #     items = None
-
+   
         conn, cur = connection(dictFlag=True)
         
         cur.execute("UPDATE shopify_auth SET total_products = %s WHERE shop = %s;", (product_count,shop,))
@@ -330,7 +325,22 @@ def process_batch(batch_dir, batch_id, shop, items):
         print("Starting batch processing.", flush=True)
         meta = items
 
-        texts = [f"{m['product_title']} - {m['variant_title']}. Tags: {', '.join(m['tags'])}" for m in meta]
+
+        for i, m in enumerate(meta):
+            if not isinstance(m.get("tags"), list):
+                print(f"[WARN] meta[{i}] has non-list 'tags': {m.get('tags')}", flush=True)
+            if any(tag is None for tag in m.get("tags", [])):
+                print(f"[WARN] meta[{i}] has None in 'tags': {m.get('tags')}", flush=True)
+
+        texts =[]
+        for i, m in enumerate(meta):
+            try:
+                joined_tags = ", ".join([t for t in m.get("tags", []) if t is not None])
+                text = f"{m['product_title']} - {m['variant_title']}. Tags: {joined_tags}"
+                texts.append(text)
+            except Exception as e:
+                print(f"[ERROR] Failed to create text for meta[{i}]: {m}", flush=True)
+                raise
         product_types = [clean_product_type(m.get("product_type", "")) for m in meta]
         sizes = [f"Size {m['size']}" if m.get("size") else "" for m in meta]
         colors = [f"Color {m['color']}" if m.get("color") else "" for m in meta]
@@ -377,9 +387,15 @@ def process_batch(batch_dir, batch_id, shop, items):
                 verify_certs=False
             )
             actions=[]
-            for item in results:
+            for idx, item in enumerate(results):
                 doc_id = quote(f"{item['shop']}__{item['variant_id']}", safe="")
                 meta = item["metadata"]
+
+                if not isinstance(meta.get("tags"), list):
+                        print(f"[WARN] result[{idx}] has non-list 'tags': {meta.get('tags')}", flush=True)
+                if any(tag is None for tag in meta.get("tags", [])):
+                    print(f"[WARN] result[{idx}] has None in 'tags': {meta.get('tags')}", flush=True)
+
 
                 doc = {
                     "_index": "products",
@@ -390,7 +406,7 @@ def process_batch(batch_dir, batch_id, shop, items):
                         "variant_id": item["variant_id"],
                         "title": meta["product_title"],
                         "variant_title": meta["variant_title"],
-                        "tags": meta.get("tags") or [],
+                        "tags": [str(t) for t in meta.get("tags", []) if t],
                         "product_type": meta["product_type"] or [],
                         "description": meta["description"] or [],
                         "sku": meta["sku"] or [],
@@ -415,7 +431,8 @@ def process_batch(batch_dir, batch_id, shop, items):
             conn.commit()
             print(f"[SUCCESS] Batch processing complete!", flush=True)
         except Exception as e:
-            print(f"Error in saving embeddings and product data to ES: {e}")
+            print(f"[ERROR] Failed to build doc for result[{idx}]: {e}", flush=True)
+            print(f"Metadata first index: {meta}", flush=True)
         finally:
             cur.close()
             conn.close()
