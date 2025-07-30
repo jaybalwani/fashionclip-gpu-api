@@ -200,6 +200,8 @@ def process_products(shop, access_token):
         
     except Exception as e:
         print(f"[{shop}] Failed to process products: {e}")
+        shutil.rmtree(base_dir, ignore_errors=True)
+
     finally:
         conn.commit()
         cur.close()
@@ -354,7 +356,6 @@ def process_batch(batch_dir, batch_id, shop, items):
                 body_shape_tags = tag_body_shapes_for_image(img_vec, body_shape_embedding_store)
                 # log(f"Body shape tag: {body_shape_tags}")
 
-
             results.append({
                 "variant_id": m["variant_id"],
                 "product_id": m["product_id"],
@@ -389,14 +390,14 @@ def process_batch(batch_dir, batch_id, shop, items):
                         "variant_id": item["variant_id"],
                         "title": meta["product_title"],
                         "variant_title": meta["variant_title"],
-                        "tags": meta["tags"],
-                        "product_type": meta["product_type"],
-                        "description": meta["description"],
-                        "sku": meta["sku"],
-                        "product_url": meta["product_url"],
+                        "tags": meta.get("tags") or [],
+                        "product_type": meta["product_type"] or [],
+                        "description": meta["description"] or [],
+                        "sku": meta["sku"] or [],
+                        "product_url": meta["product_url"] or [],
                         "selected_options": meta["selected_options"],
                         "price": meta["price"],
-                        "image_url": meta["image_url"],
+                        "image_url": meta["image_url"] or [],
                         "embedding": safe_vector(item["embedding"]),
                         "product_type_embedding": safe_vector(item["product_type_embedding"]),
                         "size_embedding": safe_vector(item["size_embedding"]),
