@@ -388,21 +388,22 @@ def process_batch(batch_dir, batch_id, shop, items):
             })
 
         conn, cur = connection(dictFlag=True)
+        print("Now moving onto ES stuff", flush=True)
         try:
             es = Elasticsearch(
                 ELASTIC_URL,
-                basic_auth=("elastic", os.getenv("ELASTIC_PASSWORD")),
+                basic_auth=("elastic", "NBLnx6PCljrZugFTqHNd"),
                 verify_certs=False
             )
             actions=[]
             for idx, item in enumerate(results):
                 doc_id = quote(f"{item['shop']}__{item['variant_id']}", safe="")
-                meta = item["metadata"]
+                single_meta = item["metadata"]
 
-                if not isinstance(meta.get("tags"), list):
-                        print(f"[WARN] result[{idx}] has non-list 'tags': {meta.get('tags')}", flush=True)
-                if any(tag is None for tag in meta.get("tags", [])):
-                    print(f"[WARN] result[{idx}] has None in 'tags': {meta.get('tags')}", flush=True)
+                if not isinstance(single_meta.get("tags"), list):
+                    print(f"[WARN] result[{idx}] has non-list 'tags': {single_meta.get('tags')}", flush=True)
+                if any(tag is None for tag in single_meta.get("tags", [])):
+                    print(f"[WARN] result[{idx}] has None in 'tags': {single_meta.get('tags')}", flush=True)
 
 
                 doc = {
@@ -412,16 +413,16 @@ def process_batch(batch_dir, batch_id, shop, items):
                         "shop": item["shop"],
                         "product_id": item["product_id"],
                         "variant_id": item["variant_id"],
-                        "title": meta["product_title"],
-                        "variant_title": meta["variant_title"],
-                        "tags": [str(t) for t in meta.get("tags", []) if t],
-                        "product_type": meta["product_type"] or [],
-                        "description": meta["description"] or [],
-                        "sku": meta["sku"] or [],
-                        "product_url": meta["product_url"] or [],
-                        "selected_options": meta["selected_options"],
-                        "price": meta["price"],
-                        "image_url": meta["image_url"] or [],
+                        "title": single_meta["product_title"],
+                        "variant_title": single_meta["variant_title"],
+                        "tags": [str(t) for t in single_meta.get("tags", []) if t],
+                        "product_type": single_meta["product_type"] or [],
+                        "description": single_meta["description"] or [],
+                        "sku": single_meta["sku"] or [],
+                        "product_url": single_meta["product_url"] or [],
+                        "selected_options": single_meta["selected_options"],
+                        "price": single_meta["price"],
+                        "image_url": single_meta["image_url"] or [],
                         "embedding": safe_vector(item["embedding"]),
                         "product_type_embedding": safe_vector(item["product_type_embedding"]),
                         "size_embedding": safe_vector(item["size_embedding"]),
@@ -433,14 +434,14 @@ def process_batch(batch_dir, batch_id, shop, items):
                 actions.append(doc)
 
             success, failed = bulk(es, actions, raise_on_error=False)
-            print(f"[bulk] success={success}, failed={len(failed)}")
+            print(f"[bulk] success={success}, failed={len(failed)}", flush=True)
 
             cur.execute("UPDATE shopify_auth SET is_synced = 1, is_sync_in_progress = 0 WHERE shop = %s;", (shop,))
             conn.commit()
             print(f"[SUCCESS] Batch processing complete!", flush=True)
         except Exception as e:
             print(f"[ERROR] Failed to build doc for result: {e}", flush=True)
-            print(f"Metadata first index: {meta}", flush=True)
+            print(f"Metadata that failed: {single_meta}", flush=True)
         finally:
             cur.close()
             conn.close()
