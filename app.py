@@ -75,7 +75,7 @@ def start_batch():
         token = data.get("token", None)
 
         sync_products_task.delay(shop, token)
-
+        print("Batch job started")
         return jsonify({"status": "accepted"}), 202
     except Exception as e:
         print(f"Error in starting batch: {e}")
